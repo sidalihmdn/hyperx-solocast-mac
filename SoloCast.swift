@@ -396,11 +396,13 @@ struct MeterBar: View {
     }
 }
 
-/// Pulls levels at 30 fps; SwiftUI pauses the timeline while the menu bar panel is closed.
+/// Pulls levels at 30 fps while the panel is visible. SwiftUI does not pause a TimelineView in a closed
+/// menu bar panel by itself (measured: ~16 % CPU with the panel closed), hence `paused`.
 struct MeterPanel: View {
     let meters: Meters
+    let visible: Bool
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !visible)) { _ in
             let levels = meters.levels
             VStack(spacing: 8) {
                 MeterBar(label: "IN", level: levels.input, peak: levels.inputPeak)
@@ -412,8 +414,9 @@ struct MeterPanel: View {
 
 struct ReductionReadout: View {
     let meters: Meters
+    let visible: Bool
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15)) { _ in
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: !visible)) { _ in
             let reduction = abs(meters.levels.reduction)
             Text(String(format: "GR %.1f dB", -reduction)).readout()
                 .foregroundStyle(reduction > 0.5 ? accent : .white.opacity(0.4))
@@ -535,7 +538,7 @@ struct ContentView: View {
             } else {
                 PresetBar(settings: $processor.settings)
                 Card(title: "LEVEL") {
-                    MeterPanel(meters: processor.meters)
+                    MeterPanel(meters: processor.meters, visible: panelVisible)
                     HStack(spacing: 4) {
                         ParameterRow(label: "Gain", value: Binding(get: { mic.gain * 100 }, set: { mic.setGain($0 / 100) }),
                                      range: 0...100, unit: "%")
@@ -565,7 +568,7 @@ struct ContentView: View {
                 Card(title: "COMPRESSOR", isOn: $processor.settings.compOn) {
                     ParameterRow(label: "Threshold", value: $processor.settings.compThreshold, range: -50...0)
                     ParameterRow(label: "Makeup", value: $processor.settings.makeup, range: 0...24)
-                    HStack { Spacer(); ReductionReadout(meters: processor.meters) }
+                    HStack { Spacer(); ReductionReadout(meters: processor.meters, visible: panelVisible) }
                 }
             }
             footer
@@ -575,6 +578,17 @@ struct ContentView: View {
         .background(LinearGradient(colors: [Color(red: 0.11, green: 0.11, blue: 0.14), Color(red: 0.05, green: 0.05, blue: 0.07)],
                                    startPoint: .top, endPoint: .bottom))
         .preferredColorScheme(.dark)
+        .onAppear { panelVisible = Self.panelIsVisible() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didChangeOcclusionStateNotification)) { _ in
+            panelVisible = Self.panelIsVisible()
+        }
+    }
+
+    @State private var panelVisible = false
+
+    /// The panel is this app's only window besides the menu bar icon's own status bar window.
+    static func panelIsVisible() -> Bool {
+        NSApp.windows.contains { !$0.className.contains("StatusBar") && $0.isVisible && $0.occlusionState.contains(.visible) }
     }
 
     private var header: some View {
