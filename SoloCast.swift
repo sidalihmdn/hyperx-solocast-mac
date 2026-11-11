@@ -1,6 +1,9 @@
 import SwiftUI
 import AVFoundation
 import Accelerate
+import Carbon
+import ServiceManagement
+import os
 
 // Menu bar app for the HyperX SoloCast.
 // Hardware settings (gain, mute, sample rate) go through CoreAudio.
@@ -81,13 +84,30 @@ struct Settings: Codable, Equatable {
               saved.eqGains.count == Processor.bands.count else { return Settings() }
         return saved
     }
+
+    static let presets: [(name: String, settings: Settings)] = [
+        ("Flat", Settings()),
+        ("Voice", Settings(gateOn: true, gateThreshold: -50, eqOn: true, eqGains: [-6, -2, 0, 3, 2],
+                           compOn: true, compThreshold: -24, makeup: 4)),
+        ("Podcast", Settings(gateOn: true, gateThreshold: -45, eqOn: true, eqGains: [-3, 2, 0, 4, 3],
+                             compOn: true, compThreshold: -28, makeup: 8)),
+        ("Call", Settings(gateOn: true, gateThreshold: -40, eqOn: true, eqGains: [-12, -3, 2, 3, 0],
+                          compOn: true, compThreshold: -20, makeup: 3)),
+    ]
 }
 
-final class Meters: ObservableObject {
-    @Published var input: Float = -120
-    @Published var inputPeak: Float = -120
-    @Published var output: Float = -120
-    @Published var reduction: Float = 0   // dB of gain the compressor is removing right now
+/// Levels written by the audio taps and read by the UI at 30 fps while the panel is open.
+/// A lock instead of @Published: no main-thread work per audio buffer, and none at all with the panel closed.
+final class Meters: @unchecked Sendable {
+    struct Levels {
+        var input: Float = -120
+        var inputPeak: Float = -120
+        var output: Float = -120
+        var reduction: Float = 0   // dB of gain the compressor is removing right now
+    }
+    private let lock = OSAllocatedUnfairLock(initialState: Levels())
+    var levels: Levels { lock.withLock { $0 } }
+    func update(_ body: @Sendable (inout Levels) -> Void) { lock.withLock(body) }
 }
 
 func peakDecibels(_ buffer: AVAudioPCMBuffer) -> Float {
@@ -195,7 +215,12 @@ final class Processor: ObservableObject {
             try engine.inputNode.auAudioUnit.setDeviceID(aggregate)
             try engine.outputNode.auAudioUnit.setDeviceID(aggregate)
             let input = engine.inputNode
-            wire(engine, from: input, format: input.outputFormat(forBus: 0))
+            // outputFormat(forBus:) can still describe the system default input (e.g. AirPods at 24 kHz mono)
+            // after setDeviceID; the hardware side is the aggregate's real format.
+            let hardware = input.inputFormat(forBus: 0)
+            guard let format = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate,
+                                             channels: hardware.channelCount) else { return }
+            wire(engine, from: input, format: format)
             // Without the virtual device the engine only feeds the meters: keep the speakers silent.
             engine.mainMixerNode.outputVolume = output == nil ? 0 : 1
             let meters = meters, unit = dynamics.audioUnit
@@ -204,18 +229,18 @@ final class Processor: ObservableObject {
                 let level = peakDecibels(buffer)
                 // Diagnostic: exactly -120 dB here means no real signal is arriving from the mic.
                 if !logged { logged = true; NSLog("SoloCast: first input buffer peak %.1f dB", level) }
-                DispatchQueue.main.async {
-                    meters.input = max(level, meters.input - 1.5)          // fast attack, smooth fall
-                    meters.inputPeak = max(level, meters.inputPeak - 0.3)  // slow-falling peak marker
+                meters.update {
+                    $0.input = max(level, $0.input - 1.5)          // fast attack, smooth fall
+                    $0.inputPeak = max(level, $0.inputPeak - 0.3)  // slow-falling peak marker
                 }
             }
             dynamics.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
                 let level = peakDecibels(buffer)
                 var reduction: AudioUnitParameterValue = 0
                 AudioUnitGetParameter(unit, kDynamicsProcessorParam_CompressionAmount, kAudioUnitScope_Global, 0, &reduction)
-                DispatchQueue.main.async {
-                    meters.output = max(level, meters.output - 1.5)
-                    meters.reduction = reduction
+                meters.update {
+                    $0.output = max(level, $0.output - 1.5)
+                    $0.reduction = reduction
                 }
             }
             try engine.start()
@@ -223,6 +248,24 @@ final class Processor: ObservableObject {
         } catch {
             NSLog("SoloCast: engine start failed: \(error)")
         }
+    }
+}
+
+// MARK: - Global mute hotkey
+
+/// Option-Command-M toggles mute from any app. Carbon hot keys need no Accessibility permission.
+enum Hotkey {
+    static var action: (() -> Void)?
+
+    static func register(_ action: @escaping () -> Void) {
+        self.action = action
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in Hotkey.action?(); return noErr }, 1, &spec, nil, nil)
+        var reference: EventHotKeyRef?
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_M), UInt32(cmdKey | optionKey),
+                                         EventHotKeyID(signature: 0x534C_4354, id: 1),  // "SLCT"
+                                         GetApplicationEventTarget(), 0, &reference)
+        if status != noErr { NSLog("SoloCast: mute hotkey unavailable (\(status)), another app may own it") }
     }
 }
 
@@ -236,15 +279,32 @@ final class Mic: ObservableObject {
     @Published var muted = false
     @Published var rate: Float64 = 0
     @Published var rates: [Float64] = []
+    /// Puts gain back when Zoom, Discord, browsers or System Settings change it.
+    @Published var gainLocked = UserDefaults.standard.bool(forKey: "gainLocked") {
+        didSet {
+            UserDefaults.standard.set(gainLocked, forKey: "gainLocked")
+            if gainLocked { lockedGain = gain }
+        }
+    }
+    private var lockedGain = UserDefaults.standard.object(forKey: "lockedGain") as? Float {
+        didSet { UserDefaults.standard.set(lockedGain, forKey: "lockedGain") }
+    }
     private var timer: Timer?
 
     /// Polls once a second: picks up plug/unplug and changes made in other apps.
     func startPolling() {
         processor.requestMicrophone()
+        Hotkey.register { [weak self] in
+            guard let self else { return }
+            self.setMuted(!self.muted)
+        }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.refresh()
+            if self.gainLocked, self.id != nil, let target = self.lockedGain, abs(self.gain - target) > 0.005 {
+                self.setGain(target)
+            }
             self.processor.sync(mic: self.id)
         }
     }
@@ -270,6 +330,7 @@ final class Mic: ObservableObject {
         for channel: UInt32 in 1...2 {
             write(id, address(kAudioDevicePropertyVolumeScalar, input: true, element: channel), value)
         }
+        if gainLocked { lockedGain = value }   // moving the slider sets the new locked value
         refresh()
     }
 
@@ -322,7 +383,6 @@ struct MeterBar: View {
                             .offset(x: max(width * meterFraction(peak) - 2, 0))
                     }
                 }
-                .animation(.linear(duration: 0.05), value: level)
             }
             .frame(height: 8)
             Text(level > -60 ? String(format: "%.0f", level) : "-∞").readout().frame(width: 28, alignment: .trailing)
@@ -333,22 +393,47 @@ struct MeterBar: View {
     }
 }
 
+/// Pulls levels at 30 fps; SwiftUI pauses the timeline while the menu bar panel is closed.
 struct MeterPanel: View {
-    @ObservedObject var meters: Meters   // observed here only, so 40+ updates a second redraw just the bars
+    let meters: Meters
     var body: some View {
-        VStack(spacing: 8) {
-            MeterBar(label: "IN", level: meters.input, peak: meters.inputPeak)
-            MeterBar(label: "OUT", level: meters.output)
+        TimelineView(.animation(minimumInterval: 1.0 / 30)) { _ in
+            let levels = meters.levels
+            VStack(spacing: 8) {
+                MeterBar(label: "IN", level: levels.input, peak: levels.inputPeak)
+                MeterBar(label: "OUT", level: levels.output)
+            }
         }
     }
 }
 
 struct ReductionReadout: View {
-    @ObservedObject var meters: Meters
+    let meters: Meters
     var body: some View {
-        Text(String(format: "GR %.1f dB", -abs(meters.reduction))).readout()
-            .foregroundStyle(abs(meters.reduction) > 0.5 ? accent : .white.opacity(0.4))
-            .accessibilityLabel("Gain reduction")
+        TimelineView(.animation(minimumInterval: 1.0 / 15)) { _ in
+            let reduction = abs(meters.levels.reduction)
+            Text(String(format: "GR %.1f dB", -reduction)).readout()
+                .foregroundStyle(reduction > 0.5 ? accent : .white.opacity(0.4))
+                .accessibilityLabel("Gain reduction")
+        }
+    }
+}
+
+struct PresetBar: View {
+    @Binding var settings: Settings
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(Settings.presets, id: \.name) { preset in
+                let active = settings == preset.settings
+                Button(preset.name) { settings = preset.settings }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(active ? .white : .white.opacity(0.65))
+                    .frame(maxWidth: .infinity, minHeight: 24)
+                    .background(Capsule().fill(active ? accent : .white.opacity(0.07)))
+                    .accessibilityAddTraits(active ? .isSelected : [])
+            }
+        }
     }
 }
 
@@ -440,10 +525,22 @@ struct ContentView: View {
                 Text("HyperX SoloCast not connected").foregroundStyle(.white.opacity(0.6))
                     .frame(maxWidth: .infinity, minHeight: 80)
             } else {
+                PresetBar(settings: $processor.settings)
                 Card(title: "LEVEL") {
                     MeterPanel(meters: processor.meters)
-                    ParameterRow(label: "Gain", value: Binding(get: { mic.gain * 100 }, set: { mic.setGain($0 / 100) }),
-                                 range: 0...100, unit: "%")
+                    HStack(spacing: 4) {
+                        ParameterRow(label: "Gain", value: Binding(get: { mic.gain * 100 }, set: { mic.setGain($0 / 100) }),
+                                     range: 0...100, unit: "%")
+                        Button { mic.gainLocked.toggle() } label: {
+                            Image(systemName: mic.gainLocked ? "lock.fill" : "lock.open")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(mic.gainLocked ? accent : .white.opacity(0.5))
+                                .frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Lock gain: undo changes made by other apps")
+                        .accessibilityLabel(mic.gainLocked ? "Unlock gain" : "Lock gain")
+                    }
                 }
                 Card(title: "NOISE GATE", isOn: $processor.settings.gateOn) {
                     ParameterRow(label: "Threshold", value: $processor.settings.gateThreshold, range: -80...(-20))
@@ -493,9 +590,12 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .disabled(mic.id == nil)
+            .help("Mute (⌥⌘M from any app)")
             .accessibilityLabel(mic.muted ? "Unmute" : "Mute")
         }
     }
+
+    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
 
     private var footer: some View {
         HStack {
@@ -505,6 +605,15 @@ struct ContentView: View {
                 }
                 .labelsHidden().controlSize(.small).fixedSize()
             }
+            Toggle("Open at login", isOn: Binding(get: { openAtLogin }, set: { enable in
+                do {
+                    if enable { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+                } catch {
+                    NSLog("SoloCast: open at login failed: \(error)")
+                }
+                openAtLogin = SMAppService.mainApp.status == .enabled
+            }))
+            .toggleStyle(.checkbox).controlSize(.small).font(.system(size: 11))
             Spacer()
             Button("Quit") { NSApp.terminate(nil) }.controlSize(.small)
         }
@@ -588,6 +697,12 @@ enum Main {
             let boosted = try render(-24, Settings(eqOn: true, eqGains: [0, 0, 12, 0, 0]))
             guard boosted > -15 else { fail("EQ +12 dB at 1 kHz should raise a 1 kHz tone, got \(boosted) dB") }
             print("OK processing flat=\(flat) gated=\(gated) open=\(open) compressed=\(compressed) boosted=\(boosted)")
+            for preset in Settings.presets {
+                // A normal speaking level must come through every preset: not gated, not crushed, not clipped.
+                let speech = try render(-20, preset.settings)
+                guard (-32)...(-1) ~= speech else { fail("preset \(preset.name) turned -20 dB into \(speech) dB") }
+                print("OK preset \(preset.name) -20 dB -> \(speech) dB")
+            }
         } catch {
             fail("offline render: \(error)")
         }

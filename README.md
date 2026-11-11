@@ -13,8 +13,12 @@ A small menu bar app to configure a HyperX SoloCast microphone on macOS. HyperX'
 - **Noise gate**: on/off and threshold.
 - **Equalizer**: 5 bands (80 Hz, 250 Hz, 1 kHz, 4 kHz, 10 kHz), ±12 dB each. Double-click a fader to reset it.
 - **Compressor**: on/off, threshold, makeup gain, live gain-reduction readout.
+- **Presets**: Flat, Voice, Podcast and Call set the gate, EQ and compressor in one click.
+- **Gain lock**: the lock next to the gain slider undoes gain changes made by Zoom, Discord, browsers or System Settings.
+- **Mute hotkey**: ⌥⌘M mutes and unmutes from any app.
+- **Open at login**: checkbox at the bottom of the panel.
 
-Settings are saved between launches.
+Settings are saved between launches. The meters only redraw while the panel is open, so the app uses almost no CPU in the background.
 
 The gate, EQ and compressor use Apple's built-in audio units. The processed sound is sent to [BlackHole](https://github.com/ExistentialAudio/BlackHole), a free virtual audio device, which you then select as the microphone in other apps.
 
@@ -79,8 +83,8 @@ Devices that do not expose gain or mute to macOS will show those controls withou
 ## Known limits
 
 - LED and other NGENUITY-only options are not supported. They use an undocumented USB protocol.
-- The app does not start at login.
-- Compressor ratio, attack and release are fixed.
+- Compressor ratio, attack and release are fixed. Presets are built in; you cannot save your own yet.
+- If another app already uses ⌥⌘M, the mute hotkey does not work.
 - macOS may ask for microphone access again after each rebuild.
 - Changing the sample rate interrupts audio for about a second.
 - Not tested for long recordings; listen for clicks or drift before relying on it.
@@ -91,4 +95,4 @@ Devices that do not expose gain or mute to macOS will show those controls withou
 - Audio runs through `AVAudioEngine`: microphone, EQ, Apple's dynamics processor (its expander is the gate), then the output.
 - `AVAudioEngine` cannot use two different devices for input and output, so the app joins the mic and BlackHole into one private aggregate device. It is hidden from other apps and removed when the app quits.
 
-Everything is in one file, `SoloCast.swift`. `build.sh` compiles it into `SoloCast.app`.
+Everything is in one file, `SoloCast.swift`. `build.sh` compiles it into `SoloCast.app`. The icon is drawn by `make-icon.swift`; run `swift make-icon.swift` to regenerate `AppIcon.icns` after changing it.
