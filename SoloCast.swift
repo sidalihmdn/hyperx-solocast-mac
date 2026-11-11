@@ -425,13 +425,17 @@ struct PresetBar: View {
         HStack(spacing: 6) {
             ForEach(Settings.presets, id: \.name) { preset in
                 let active = settings == preset.settings
-                Button(preset.name) { settings = preset.settings }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(active ? .white : .white.opacity(0.65))
-                    .frame(maxWidth: .infinity, minHeight: 24)
-                    .background(Capsule().fill(active ? accent : .white.opacity(0.07)))
-                    .accessibilityAddTraits(active ? .isSelected : [])
+                Button { settings = preset.settings } label: {
+                    // Frame and shape inside the label: a plain button is only clickable where its label is.
+                    Text(preset.name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(active ? .white : .white.opacity(0.65))
+                        .frame(maxWidth: .infinity, minHeight: 24)
+                        .background(Capsule().fill(active ? accent : .white.opacity(0.07)))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
     }
