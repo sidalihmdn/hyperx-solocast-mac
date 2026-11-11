@@ -13,7 +13,7 @@ A small menu bar app to configure a HyperX SoloCast microphone on macOS. HyperX'
 - **Noise gate**: on/off and threshold.
 - **Equalizer**: 5 bands (80 Hz, 250 Hz, 1 kHz, 4 kHz, 10 kHz), ±12 dB each. Double-click a fader to reset it.
 - **Compressor**: on/off, threshold, makeup gain, live gain-reduction readout.
-- **Presets**: Flat, Voice, Podcast and Call set the gate, EQ and compressor in one click.
+- **Presets**: Flat, Voice, Voiceover, Podcast and Call set the gate, EQ and compressor in one click.
 - **Gain lock**: the lock next to the gain slider undoes gain changes made by Zoom, Discord, browsers or System Settings.
 - **Mute hotkey**: ⌥⌘M mutes and unmutes from any app.
 - **Open at login**: checkbox at the bottom of the panel.

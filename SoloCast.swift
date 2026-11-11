@@ -89,6 +89,9 @@ struct Settings: Codable, Equatable {
         ("Flat", Settings()),
         ("Voice", Settings(gateOn: true, gateThreshold: -50, eqOn: true, eqGains: [-6, -2, 0, 3, 2],
                            compOn: true, compThreshold: -24, makeup: 4)),
+        // Gate off: the hard gate clips word tails and breaths; trim silence in the editor instead.
+        ("Voiceover", Settings(gateOn: false, gateThreshold: -60, eqOn: true, eqGains: [-6, -2, 0, 2, 1],
+                               compOn: true, compThreshold: -22, makeup: 4)),
         ("Podcast", Settings(gateOn: true, gateThreshold: -45, eqOn: true, eqGains: [-3, 2, 0, 4, 3],
                              compOn: true, compThreshold: -28, makeup: 8)),
         ("Call", Settings(gateOn: true, gateThreshold: -40, eqOn: true, eqGains: [-12, -3, 2, 3, 0],
@@ -430,6 +433,7 @@ struct PresetBar: View {
                     Text(preset.name)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(active ? .white : .white.opacity(0.65))
+                        .lineLimit(1).minimumScaleFactor(0.8)   // five pills share 312 pt
                         .frame(maxWidth: .infinity, minHeight: 24)
                         .background(Capsule().fill(active ? accent : .white.opacity(0.07)))
                         .contentShape(Capsule())
